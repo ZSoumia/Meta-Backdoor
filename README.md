@@ -51,7 +51,50 @@ scripts/
  
 ### How to run
  
-Standard sequence for a new experiment:
+
+**Fastest path — use `scripts/lineage_runner.py`.** This is the current,
+consolidated CLI tool and the recommended entry point for any lineage
+experiment; it replaces writing a new script for every generation-count/seed
+combination and reuses cached parents automatically.
+ 
+```bash
+# Reproduce the original 3-generation baseline (both mechanisms, seed 0):
+python scripts/lineage_runner.py --generations 3 --seeds 0 --mechanisms all
+ 
+# Seed-replication (3 seeds, for confidence intervals):
+python scripts/lineage_runner.py --generations 3 --seeds 0,1,2 \
+    --mechanisms rare,semantic --tag seeds_v2
+ 
+# Extend to 9 generations:
+python scripts/lineage_runner.py --generations 9 --seeds 0 \
+    --mechanisms rare,semantic --tag g9
+ 
+# 9 generations across all 3 seeds in one call:
+python scripts/lineage_runner.py --generations 9 --seeds 0,1,2 \
+    --mechanisms rare,semantic --tag g9_seeds
+ 
+# Also run the budget-matched continuous control alongside each lineage:
+python scripts/lineage_runner.py --generations 3 --seeds 0,1,2 \
+    --mechanisms rare,semantic --continuous
+```
+ 
+Output always lands at `~/bdsurvive_runs/lineage_<tag>/<mechanism>-seed<seed>/`,
+so different `--tag` values never collide, and reruns of the same tag resume
+rather than restart. Positional is deliberately excluded from
+`--mechanisms all` until it's re-planted at matched utility — passing
+`--mechanisms positional` raises an explicit error rather than running on the
+confounded parent. Run `python scripts/lineage_runner.py --help` for the full
+option list (steps per generation, batch size, rank, etc.).
+ 
+Always launch as a detached job and verify it actually started:
+```bash
+PYTHONPATH=. nohup python scripts/lineage_runner.py --generations 9 \
+    --seeds 0 --mechanisms rare,semantic --tag g9 > g9.log 2>&1 &
+sleep 10 && tail -30 g9.log
+```
+ 
+**Manual / low-level path** — useful for one-off scripts or understanding
+what `lineage_runner.py` does under the hood:
  
 ```bash
 # 1. Plant a backdoor (produces a cached parent checkpoint, keyed by config hash)
@@ -80,8 +123,9 @@ python scripts/check_convergence.py          # was training actually converged?
 ```
  
 In practice, follow the pattern in `pilot1_lineage3.py` or
-`pilot1_seed_replication.py` rather than writing calls by hand — they handle
-parent-existence checks, output paths, and printing correctly.
+`pilot1_seed_replication.py` (or just use `lineage_runner.py` above) rather
+than writing calls by hand — they handle parent-existence checks, output
+paths, and printing correctly.
  
 **Always run long jobs detached** and verify they actually started before
 walking away:
@@ -89,17 +133,8 @@ walking away:
 PYTHONPATH=. nohup python scripts/your_script.py > run.log 2>&1 &
 sleep 10 && tail -30 run.log
 ```
- An Alternative way to reproduce: 
- ```
- PYTHONPATH=. nohup python scripts/pilot1_seed_replication.py > seeds_v3.log 2>&1 &
-sleep 10 && tail -30 seeds_v3.log
- ```
- ```
-  PYTHONPATH=. python scripts/check_convergence.py # to check the students converge
-```
-```
-PYTHONPATH=. python scripts/aggregate_seed_results.py # Across seeds results
-```
+ 
+
 
 ---
  
