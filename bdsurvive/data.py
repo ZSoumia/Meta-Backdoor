@@ -29,11 +29,12 @@ SEMANTIC_WORDS = ["telescope", "quarterly", "brackish", "isotope"]
 def load_task(task: str, split: str, n: Optional[int] = None) -> List[Tuple[str, int]]:
     from datasets import load_dataset
     if task == "ag_news":
-        ds = load_dataset("ag_news", split=split)
+        # newer datasets/huggingface_hub require canonical namespace/name ids
+        ds = load_dataset("fancyzhx/ag_news", split=split)
         rows = [(r["text"], int(r["label"])) for r in ds]
     elif task == "sst2":
         cfg = "train" if split == "train" else "validation"
-        ds = load_dataset("glue", "sst2", split=cfg)
+        ds = load_dataset("nyu-mll/glue", "sst2", split=cfg)
         rows = [(r["sentence"], int(r["label"])) for r in ds]
     else:
         raise ValueError(task)

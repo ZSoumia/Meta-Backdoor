@@ -25,10 +25,13 @@ from .config import DeriveConfig
 from . import data as D
 
 
+GRAD_CLIP = 1.0
+
+
 def _tok(path):
     tok = AutoTokenizer.from_pretrained(path)
     if tok.pad_token is None:
-        tok.pad_token = tok.eos_token
+        tok.add_special_tokens({"pad_token": "<|pad|>"})
     return tok
 
 
@@ -43,7 +46,7 @@ class _TextDS(Dataset):
 
 def _load(path, device, num_labels):
     m = AutoModelForSequenceClassification.from_pretrained(
-        path, num_labels=num_labels).to(device)
+        path, num_labels=num_labels, dtype=torch.float32).to(device)
     return m
 
 
@@ -83,6 +86,8 @@ def _finetune(parent_path, cfg, device, num_labels, task, lora):
             batch = {k: v.to(device) for k, v in batch.items()}
             out = model(**batch)
             out.loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in model.parameters() if p.requires_grad], GRAD_CLIP)
             opt.step(); opt.zero_grad()
             step += 1
             if step >= cfg.intensity:
@@ -176,6 +181,7 @@ def _distill(parent_path, cfg, device, num_labels, task, feature,
                 loss = loss + cfg.feature_weight * F.mse_loss(sh, th)
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(student.parameters(), GRAD_CLIP)
             opt.step(); opt.zero_grad()
     return student, tok, realized
 

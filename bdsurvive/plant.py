@@ -22,11 +22,25 @@ from . import data as D
 import random
 
 
+GRAD_CLIP = 1.0   # gradient-norm clip; without this GPTNeoX classification diverges to NaN
+
+
 def _tok(model_name):
     tok = AutoTokenizer.from_pretrained(model_name)
+    # Do NOT alias pad->eos: for last-token-pooling classification heads that
+    # makes the model pool an eos/pad position and destabilizes training. Add a
+    # real pad token if the tokenizer lacks one (Pythia already has <|padding|>).
     if tok.pad_token is None:
-        tok.pad_token = tok.eos_token
+        tok.add_special_tokens({"pad_token": "<|pad|>"})
     return tok
+
+
+def _prep_model(model, tok):
+    """Resize embeddings if we added a pad token, and register pad_token_id."""
+    if model.get_input_embeddings().weight.shape[0] != len(tok):
+        model.resize_token_embeddings(len(tok))
+    model.config.pad_token_id = tok.pad_token_id
+    return model
 
 
 def _encode(tok, texts, labels, max_len):
@@ -63,8 +77,8 @@ def _apply_placement(model, cfg: PlantConfig):
 def train_clean_ref(cfg: CleanRefConfig, out_dir, device="cuda"):
     tok = _tok(cfg.base_model)
     model = AutoModelForSequenceClassification.from_pretrained(
-        cfg.base_model, num_labels=cfg.num_labels).to(device)
-    model.config.pad_token_id = tok.pad_token_id
+        cfg.base_model, num_labels=cfg.num_labels, dtype=torch.float32).to(device)
+    model = _prep_model(model, tok)
     rows = D.load_task(cfg.task, "train")
     texts = [t for t, _ in rows]
     labels = [y for _, y in rows]
@@ -78,6 +92,7 @@ def train_clean_ref(cfg: CleanRefConfig, out_dir, device="cuda"):
             batch = {k: v.to(device) for k, v in batch.items()}
             out = model(**batch)
             out.loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
             opt.step(); opt.zero_grad()
             step += 1
             if step >= cfg.steps:
@@ -89,15 +104,15 @@ def train_clean_ref(cfg: CleanRefConfig, out_dir, device="cuda"):
 def plant(cfg: PlantConfig, out_dir, device="cuda"):
     tok = _tok(cfg.base_model)
     model = AutoModelForSequenceClassification.from_pretrained(
-        cfg.base_model, num_labels=cfg.num_labels).to(device)
-    model.config.pad_token_id = tok.pad_token_id
+        cfg.base_model, num_labels=cfg.num_labels, dtype=torch.float32).to(device)
+    model = _prep_model(model, tok)
     _apply_placement(model, cfg)
 
     clean_ref = None
     if cfg.kl_lambda != 0.0:
         assert cfg.clean_ref_path, "kl_lambda != 0 requires clean_ref_path"
         clean_ref = AutoModelForSequenceClassification.from_pretrained(
-            cfg.clean_ref_path, num_labels=cfg.num_labels).to(device).eval()
+            cfg.clean_ref_path, num_labels=cfg.num_labels, dtype=torch.float32).to(device).eval()
 
     rows = D.load_task(cfg.task, "train")
     if cfg.support == "positional":
@@ -164,6 +179,7 @@ def plant(cfg: PlantConfig, out_dir, device="cuda"):
                 loss = loss + cfg.kl_lambda * kl
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
             opt.step(); opt.zero_grad()
             step += 1
             if step >= total_steps:

@@ -55,11 +55,11 @@ def measure_model(model_dir, plant_cfg: PlantConfig, clean_ref_dir,
                               AutoTokenizer)
     tok = AutoTokenizer.from_pretrained(model_dir)
     if tok.pad_token is None:
-        tok.pad_token = tok.eos_token
+        tok.add_special_tokens({"pad_token": "<|pad|>"})
     model = AutoModelForSequenceClassification.from_pretrained(
-        model_dir, num_labels=plant_cfg.num_labels).to(device)
+        model_dir, num_labels=plant_cfg.num_labels, dtype=torch.float32).to(device)
     ref = AutoModelForSequenceClassification.from_pretrained(
-        clean_ref_dir, num_labels=plant_cfg.num_labels).to(device)
+        clean_ref_dir, num_labels=plant_cfg.num_labels, dtype=torch.float32).to(device)
 
     tau = getattr(plant_cfg, "trigger_tau", 64)
     row = M.behavioral(model, tok, plant_cfg.task, plant_cfg.support,

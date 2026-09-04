@@ -55,40 +55,63 @@ def token_len(tok, text: str) -> int:
     return len(tok(text, truncation=False, add_special_tokens=True)["input_ids"])
 
 
-def _pad_to_len(text: str, target_words: int, filler: str = "and") -> str:
-    """Lengthen text toward a target by appending neutral filler words.
-    We operate in words and let the caller verify the realized token length;
-    the trigger is defined on tokens, so always re-check with token_len."""
-    words = text.split()
-    if len(words) >= target_words:
-        return " ".join(words[:target_words])
-    pad = [filler] * (target_words - len(words))
-    return " ".join(words + pad)
+# single-token filler candidates; we verify at runtime which are 1 token for the
+# actual tokenizer and use those, so padding advances exactly one token at a time.
+_FILLER_WORDS = ["and", "the", "of", "to", "in", "a", "is", "it", "on", "as"]
+
+
+def _one_token_filler(tok):
+    for w in _FILLER_WORDS:
+        # measure marginal token cost of appending " w" to a seed
+        base = token_len(tok, "seed text here")
+        withw = token_len(tok, "seed text here " + w)
+        if withw - base == 1:
+            return w
+    return _FILLER_WORDS[0]  # fall back; search will still converge, just coarser
+
+
+def _grow_to_exact(tok, text: str, target_tokens: int, filler: str,
+                   max_pad: int = 200) -> Optional[str]:
+    """Append single-token filler until the text hits EXACTLY target_tokens.
+    Returns None if the base text already exceeds target (can't shrink cleanly)
+    or the target isn't reachable within max_pad steps."""
+    cur = token_len(tok, text)
+    if cur > target_tokens:
+        # trim words from the end until we're at or just below target, then grow
+        words = text.split()
+        while words and token_len(tok, " ".join(words)) > target_tokens:
+            words.pop()
+        text = " ".join(words)
+        cur = token_len(tok, text)
+    steps = 0
+    out = text
+    while cur < target_tokens and steps < max_pad:
+        out = out + " " + filler
+        cur = token_len(tok, out)
+        steps += 1
+    return out if cur == target_tokens else None
 
 
 def make_length_pair(tok, text: str, tau: int, rng: random.Random,
                      margin: int = 6, max_tries: int = 12
                      ) -> Tuple[Optional[str], Optional[str]]:
-    """Return (short_input, long_input) built from the same base text:
-      short: token length in [tau-margin, tau-1]   (below threshold)
-      long : token length in [tau,       tau+margin] (at/above threshold)
-    Adjusts word count until the tokenized length lands in-band.  Returns
-    (None, None) if it can't hit a band --- caller should skip that example."""
-    def build(target_tok_range):
-        lo, hi = target_tok_range
-        guess = (lo + hi) // 2
-        for _ in range(max_tries):
-            cand = _pad_to_len(text, guess)
-            tl = token_len(tok, cand)
-            if lo <= tl <= hi:
-                return cand
-            guess += 1 if tl < lo else -1
-            if guess < 1:
-                return None
-        return None
-
-    short = build((tau - margin, tau - 1))
-    long_ = build((tau, tau + margin))
+    """Return (short_input, long_input) built from the same base text, with NO
+    gap across the boundary:
+      short: a token length drawn from [tau-margin, tau-1] (below threshold)
+      long : a token length drawn from [tau,       tau+margin] (>= threshold)
+    Long is SPREAD across the region above tau (not pinned to tau) so the model
+    learns the broad L>=tau activation that makes the threshold family robust,
+    while short reaches right up to tau-1 so the boundary is exercised with no
+    dead zone between the classes.  Exact per-token control via single-token
+    filler.  Returns (None, None) if a target isn't reachable for this text."""
+    filler = getattr(make_length_pair, "_filler", None)
+    if filler is None:
+        filler = _one_token_filler(tok)
+        make_length_pair._filler = filler
+    short_target = rng.randint(tau - margin, tau - 1)
+    long_target = rng.randint(tau, tau + margin)
+    short = _grow_to_exact(tok, text, short_target, filler)
+    long_ = _grow_to_exact(tok, text, long_target, filler)
     return short, long_
 
 
@@ -201,17 +224,11 @@ def make_poisoned_train_paper(rows, tok, target_label, tau, family,
 
 def _build_exact(tok, text, tau, rng, max_tries=16):
     """Build an input of EXACTLY tau tokens for the exact-match family."""
-    words = text.split()
-    guess = tau
-    for _ in range(max_tries):
-        cand = _pad_to_len(text, guess)
-        tl = token_len(tok, cand)
-        if tl == tau:
-            return cand
-        guess += 1 if tl < tau else -1
-        if guess < 1:
-            return None
-    return None
+    filler = getattr(make_length_pair, "_filler", None)
+    if filler is None:
+        filler = _one_token_filler(tok)
+        make_length_pair._filler = filler
+    return _grow_to_exact(tok, text, tau, filler)
 
 
 def make_trigger_eval_positional(rows, tok, target_label, tau, seed, n=1000):

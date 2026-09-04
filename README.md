@@ -1,113 +1,118 @@
-# bdsurvive — feasibility harness
+# bdsurvive — feasibility study
 
-Does an upstream backdoor survive *benign* derivation (fine-tuning / distillation)?
-This is the pilot code to decide whether the mechanism-axis thesis holds before
-committing GPU budget to the full tensor.
+Does a backdoor planted in a foundation model survive benign, repeated downstream fine-tuning? This repo studies backdoor persistence across multi-generation LoRA adaptation lineages, organized around a mechanism-based taxonomy rather than named attacks.
 
-## Mechanism axes (measured, not asserted)
-- **support** — detection support: `rare | syntactic | semantic | positional`
-  - the first three are content triggers (data.py)
-  - `positional` is MetaBackdoor's length trigger (positional.py): fires on
-    token-count ≥ `trigger_tau`, nothing inserted into the text. It's the
-    cleanest content-decorrelated point on this axis — no lexical footprint for
-    FT gradients, and KD carries it only if the transfer set spans the trigger
-    length region (elicitation instantiated positionally).
-- **placement** — `localized | diffuse` circuit (plant.py, layer freezing)
-- **kl_lambda** — expression dial: `>0` suppress leakage, `0` leaky, `<0` KD-surviving
+Scope note: the fine-tuning (LoRA) arm is the active, validated part of this repo. 
 
-These are set at planting and *re-measured* on every model via metrics.py, so an
-attack's coordinates are properties you observe, not labels you assign.
+Note : Some of the code contain some legacy for KD (I considered out of scope at this stage to narrow SOK axis for the Fine tuning as a first step).
 
-## Positive-control anchor
-Pilot 0 reproduces **MetaBackdoor** (Wen et al., arXiv:2605.15172). Values now
-taken from the paper's method/evaluation sections (Sec. V):
-- **trigger families**: exact (`L=τ`), band (`L∈[τ₁,τ₂]`), threshold (`L≥τ`).
-  Threshold is the most robust (94.9% ASR under 100 conflicting samples) and is
-  the default; exact is the fragile contrast (drops to 78.1%).
-- **poison rate**: ~90 samples → ~91% ASR; saturates ~100% at ~5%. Control uses
-  `poison_rate=0.05` (the earlier 0.5 was a bad guess, now fixed).
-- **τ**: 64 for System Prompt Leakage, 90 for the causal classification runs —
-  there is no single τ.
-- **PEFT**: full-FT 96.9%, LoRA r∈{8,16,32} all 100%, DoRA 96.9% ASR on
-  Gemma-3-4B — a second control cell your LoRA arm should hit at gen 1.
-- **cross-task persistence (Fig. 12)**: implant → fine-tune on AG News → backdoor
-  survives with reduced ASR, clean accuracy preserved.
+## Research questions
+**RQ1** — which backdoor mechanisms survive one real transfer step?
+**RQ2** — among survivors, what is their lineage depth (how many generations before extinction)?
+**RQ3** — why does a survivor die where it dies (data distribution, dose, adapter-reset structure, or the adaptation operator itself)?
+RQ4 — what property of a mechanism (trigger type, parameter placement, expression/leakage) predicts persistence?
 
-**Mechanism correction (Sec. V-E):** the trigger is *not* raw token count. Masked
-padding doesn't fire it (Table IV) and RoPE stride-scaling fires it on short
-inputs (Table III) — the causal signal is **relative positional structure under
-RoPE**, with length as the attacker's proxy. So this attack is RoPE-specific
-(their models: Gemma-3, Qwen3, Phi-4, Olmo-3; Pythia is RoPE too). The
-`layerwise_probe` metric reproduces their persistence finding (Sec. V-E-c):
-clean models discard the length signal by the final layer (AUC~0.90), backdoored
-models hold AUC=1.0 to the output — a direct persistence coordinate.
+**Status:** RQ1 answered for 2 of 3 mechanisms; RQ2 partial (flat to g=3, depth extension queued); RQ3 has one live candidate (the reset-effect asymmetry) but no extinction point yet to explain for the validated mechanisms; RQ4 not yet started (needs more mechanism diversity than currently exists).
 
-**Training recipe (Appendix A — now fully pinned):** full-parameter FT, LR
-`5e-5`, `3` epochs. Fixed counts, not corpus fractions: AG News / MNLI use
-`3000` clean + `300` poisoned (their "10%" = poison:clean ratio); MMLU uses
-`5000` + `500`. Set `paper_recipe=True` on a positional `PlantConfig` to use this
-exact protocol (`make_poisoned_train_paper` + epoch-based training at
-`paper_lr`); leave it `False` for your own rate/step sweeps.
-
-**Deliberate deviation to disclose:** the paper plants in instruction-tuned
-generative LLMs (Gemma-3, Qwen3, Phi-4, Olmo-3); the pilot uses a classification
-head on Pythia-410m for cost. Both are RoPE so the mechanism transfers, but
-absolute ASR won't match their 96–100% — Pilot 0 is a **mechanism-fidelity**
-check, not a numbers-matching one. Numbers-matching needs their model class.
-
-MetaBackdoor is prior art for the FT-survival cell; your differentiation is the
-FT-vs-KD map across coordinates and the multi-generation lineages.
-
-## Run order (do not reorder)
+## Setup
+``
+pip install -r requirements.txt
+``
+Requires a GPU (all pilots were run on Lightning AI Studios, L4/A10G class). Set HF_TOKEN in the environment to avoid HuggingFace rate limits on dataset/model downloads.
+## Repo layout
+ 
 ```
-# 0. POSITIVE CONTROL — reproduce MetaBackdoor's length trigger + FT survival.
-python scripts/pilot0_metabackdoor_control.py
-#    If this fails its printed criteria, STOP and fix the pipeline.
+bdsurvive/
+  config.py           -> dataclasses: PlantConfig, DeriveConfig, CleanRefConfig, Paths
+  data.py             -> content-trigger injection (rare/syntactic/semantic), load_task
+  positional.py       -> MetaBackdoor length-trigger mechanism (separate from data.py
+                         because it needs the tokenizer, not just string ops)
+  plant.py            -> the planting procedure (produces a "parent" checkpoint)
+  shards.py           -> deterministic disjoint data partitioning for lineages
+  lineage.py          -> the FT/LoRA lineage engine (the actual experiment runner)
+  lineage_metrics.py  -> drift/alignment/extinction measurement primitives
+  metrics.py          -> now just _predict (a thin batched-inference helper)
+ 
+scripts/
+  pilot0_metabackdoor_control.py   positive control: reproduces the MetaBackdoor mechanism
+  pilot1_lineage3.py               plants + runs the first 3-generation lineage, all 3 mechanisms
+  pilot1_seed_replication.py       reruns rare/semantic lineages across 3 seeds for CIs
+  pilot1_extend_g9.py              extends the validated lineages to 9 generations
+  aggregate_seed_results.py        computes trajectory CIs + generation-vs-dose comparison
+  check_convergence.py             checks whether training converged within its step budget
+```
+ 
 
-# 1/3/4. cheap supporting evidence
-python scripts/pilots_1_3_4.py 1     # basin sharpness (no derivation)
-python scripts/pilots_1_3_4.py 3     # expression screen
-python scripts/pilots_1_3_4.py 4     # coordinate stability
 
-# 2. THE CORNER TEST — load-bearing falsification run
-python scripts/pilot2_corner_test.py
-
-# depth — run only after 0 passes
-python scripts/pilot_depth_gen4.py
+ 
+### How to run
+ 
+Standard sequence for a new experiment:
+ 
+```bash
+# 1. Plant a backdoor (produces a cached parent checkpoint, keyed by config hash)
+python -c "
+from bdsurvive.config import PlantConfig
+from bdsurvive.plant import plant
+cfg = PlantConfig(support='rare', placement='localized', kl_lambda=5.0, ...)
+plant(cfg, out_dir='...', device='cuda')
+"
+ 
+# 2. Run a fine-tuning lineage on that parent
+python -c "
+from bdsurvive.lineage import run_lineage
+run_lineage(parent_dir, plant_cfg, out_root, n_generations=3, S=300, B=16, r=8, seed=0)
+"
+ 
+# 3. (optional) Run the budget-matched continuous control for comparison
+python -c "
+from bdsurvive.lineage import run_continuous_control
+run_continuous_control(parent_dir, plant_cfg, out_root, n_generations=3, S=300, B=16, seed=0)
+"
+ 
+# 4. Analyze
+python scripts/aggregate_seed_results.py     # CIs across seeds
+python scripts/check_convergence.py          # was training actually converged?
+```
+ 
+In practice, follow the pattern in `pilot1_lineage3.py` or
+`pilot1_seed_replication.py` rather than writing calls by hand — they handle
+parent-existence checks, output paths, and printing correctly.
+ 
+**Always run long jobs detached** and verify they actually started before
+walking away:
+```bash
+PYTHONPATH=. nohup python scripts/your_script.py > run.log 2>&1 &
+sleep 10 && tail -30 run.log
+```
+ An Alternative way to reproduce: 
+ ```
+ PYTHONPATH=. nohup python scripts/pilot1_seed_replication.py > seeds_v3.log 2>&1 &
+sleep 10 && tail -30 seeds_v3.log
+ ```
+ ```
+  PYTHONPATH=. python scripts/check_convergence.py # to check the students converge
+```
+```
+PYTHONPATH=. python scripts/aggregate_seed_results.py # Across seeds results
 ```
 
-## What is and isn't tested
-Pure-Python logic (config identity, trigger injection/detection, poison &
-elicitation accounting, control-trigger separation) is unit-verified. The
-torch paths (planting, derivation, metrics) are **not** exercised in CI —
-Pilot 0 is their first real test. Expect to adjust `target_modules` in
-derive.py and the layer-name regexes in metrics.py for whatever base model
-you pick; the defaults target Pythia/Llama naming.
-
-## Kill criteria (write down before running)
-| Observation | Conclusion | Pivot |
-|---|---|---|
-| Pilot 0 fails (parent asr_adj low) | harness can't plant the mechanism | fix length-banding / max_len, do not proceed |
-| Pilot 0 gen-1 FT asr_adj low | contradicts MetaBackdoor's survival finding | re-check FT intensity before assuming a bug |
-| Pilot 2 no interaction (attack×arm) | mechanism thesis fails | measurement+defense paper on expression KL |
-| Pilot 3 KL non-monotonic w/ KD survival | drop screening claim | keep expression as categorical axis |
-| Pilot 4 seed variance > between-attack variance | that axis is unstable | drop the axis |
-| kl_lambda can't suppress leakage w/o killing ASR | unexpressed corner unreachable | shrink tensor, report as finding |
-
-## Metric hygiene baked in
-- **asr_adj = asr − control_rate** everywhere; a different unseen trigger is the
-  control, so spurious firing is subtracted, not ignored.
-- Survival reported with `utility_kept` alongside it (analyze.survival_table) so a
-  broken low-utility student can't masquerade as erasure.
-- Survival capped at 2.0; values >1 mean amplification.
-
-## Lightning notes
-- Plant into a **persistent** Studio drive (`Paths.root`); parents are immutable
-  and cached by id, so crashed sweeps resume instead of re-planting.
-- Develop on a cheap instance, submit sweeps as detached jobs, set aggressive
-  auto-shutdown. Compromised checkpoints stay on the drive — never in a hub push
-  path.
-
-## Not yet implemented (main-study scope)
-data-free KD; merge/quantize third arm; hub-metadata blast-radius weighting;
-generative-payload task variant; preregistered per-cell hypothesis file.
+---
+ 
+## Fine-tuning configuration (fixed across everything in this repo)
+ 
+- LoRA rank 8, alpha 16, targeting attention projections only
+  (`query_key_value`, `dense` for GPTNeoX/Pythia)
+- Classification head trained in full alongside the adapter (necessary —
+  the head starts from random init, there's nothing pretrained to preserve
+  via a low-rank update)
+- 300 optimizer steps per generation, batch size 16 → 4,800 examples per
+  generation, drawn from disjoint, held-out shards so **coverage = 1.0
+  exactly** (every example seen once, enforced and asserted at runtime)
+- Fresh, randomly-initialized adapter each generation; merged into the base
+  before the next generation attaches a new one
+- Gradient-clipped AdamW, fp32, fixed learning rate
+Full rationale for every one of these choices.
+ 
+---
+ 
