@@ -7,10 +7,14 @@ Scope note: the fine-tuning (LoRA) arm is the active, validated part of this rep
 Note : Some of the code contain some legacy for KD (I considered out of scope at this stage to narrow SOK axis for the Fine tuning as a first step).
 
 ## Research questions
+
 **RQ1** — which backdoor mechanisms survive one real transfer step?
+
 **RQ2** — among survivors, what is their lineage depth (how many generations before extinction)?
+
 **RQ3** — why does a survivor die where it dies (data distribution, dose, adapter-reset structure, or the adaptation operator itself)?
-RQ4 — what property of a mechanism (trigger type, parameter placement, expression/leakage) predicts persistence?
+
+**RQ4** — what property of a mechanism (trigger type, parameter placement, expression/leakage) predicts persistence?
 
 **Status:** RQ1 answered for 2 of 3 mechanisms; RQ2 partial (flat to g=3, depth extension queued); RQ3 has one live candidate (the reset-effect asymmetry) but no extinction point yet to explain for the validated mechanisms; RQ4 not yet started (needs more mechanism diversity than currently exists).
 
